@@ -27,6 +27,7 @@ include_directories("${MONERO_PROJECT}/contrib/epee/include")
 include_directories("${MONERO_PROJECT}/external/")
 include_directories("${MONERO_PROJECT}/external/easylogging++")
 include_directories("${MONERO_PROJECT}/external/rapidjson/include")
+include_directories("${MONERO_PROJECT}/external/mx25519/include")
 include_directories("${MONERO_PROJECT_SRC}/")
 include_directories("${MONERO_PROJECT_SRC}/wallet")
 include_directories("${MONERO_PROJECT_SRC}/wallet/api")
@@ -265,6 +266,22 @@ add_library(randomx STATIC IMPORTED)
 set_target_properties(randomx PROPERTIES IMPORTED_LOCATION
     ${MONERO_PROJECT_BUILD}/external/randomx/librandomx.a)
     
+add_library(seraphis STATIC IMPORTED)
+set_target_properties(seraphis PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/src/seraphis/libseraphis.a)
+
+add_library(seraphis_crypto STATIC IMPORTED)
+set_target_properties(seraphis_crypto PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/src/seraphis_crypto/libseraphis_crypto.a)
+
+add_library(seraphis_mocks STATIC IMPORTED)
+set_target_properties(seraphis_mocks PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/src/seraphis_mocks/libseraphis_mocks.a)
+
+add_library(mx25519 STATIC IMPORTED)
+set_target_properties(mx25519 PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/external/mx25519/libmx25519.a)
+
 ########################
 # Build c++ library
 ########################
@@ -309,7 +326,11 @@ if (BUILD_LIBRARY)
         randomx
         epee
         hardforks
+        seraphis_mocks
+        seraphis
+        seraphis_crypto
         cncrypto
+        mx25519
         ${wallet_crypto}
         
         ${UNBOUND_LIBRARIES}
@@ -374,7 +395,11 @@ if (BUILD_SAMPLE)
         dl
         epee
         hardforks
+        seraphis_mocks
+        seraphis
+        seraphis_crypto
         cncrypto
+        mx25519
         ${wallet_crypto}
 
         ${UNBOUND_LIBRARIES}
@@ -423,7 +448,11 @@ if (BUILD_SCRATCHPAD)
         dl
         epee
         hardforks
+        seraphis_mocks
+        seraphis
+        seraphis_crypto
         cncrypto
+        mx25519
         ${wallet_crypto}
         
         ${UNBOUND_LIBRARIES}

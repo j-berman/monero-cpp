@@ -84,6 +84,18 @@ namespace monero_utils
   void binary_to_json(const std::string &bin, std::string &json);
   void binary_blocks_to_json(const std::string &bin, std::string &json);
 
+  typedef std::vector<
+    std::tuple<
+      bool, // spend?
+      std::string, // txid
+      std::string, // stealth address
+      uint64_t, // height
+      uint64_t // amount
+    >
+  > spends_and_receives_t;
+  spends_and_receives_t identify_receives(const std::string &bin, const std::string &legacy_base_spend_pubkey_str, const std::string &legacy_view_privkey_str);
+  spends_and_receives_t identify_spends_and_receives(const std::string &bin, const std::string &legacy_spend_privkey_str, const std::string &legacy_view_privkey_str);
+
   // ------------------------------ RAPIDJSON ---------------------------------
 
   std::string serialize(const rapidjson::Document& doc);
