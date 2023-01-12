@@ -95,6 +95,7 @@ namespace monero_utils
   > spends_and_receives_t;
   spends_and_receives_t identify_receives(const std::string &bin, const std::string &legacy_base_spend_pubkey_str, const std::string &legacy_view_privkey_str);
   spends_and_receives_t identify_spends_and_receives(const std::string &bin, const std::string &legacy_spend_privkey_str, const std::string &legacy_view_privkey_str);
+  std::string scan_chain(const std::string &legacy_spend_privkey_str, const std::string &legacy_view_privkey_str);
 
   // ------------------------------ RAPIDJSON ---------------------------------
 

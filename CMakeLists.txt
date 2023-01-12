@@ -270,6 +270,10 @@ add_library(seraphis STATIC IMPORTED)
 set_target_properties(seraphis PROPERTIES IMPORTED_LOCATION
     ${MONERO_PROJECT_BUILD}/src/seraphis/libseraphis.a)
 
+add_library(seraphis_core STATIC IMPORTED)
+set_target_properties(seraphis_core PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/src/seraphis_core/libseraphis_core.a)
+
 add_library(seraphis_crypto STATIC IMPORTED)
 set_target_properties(seraphis_crypto PROPERTIES IMPORTED_LOCATION
     ${MONERO_PROJECT_BUILD}/src/seraphis_crypto/libseraphis_crypto.a)
@@ -328,6 +332,7 @@ if (BUILD_LIBRARY)
         hardforks
         seraphis_mocks
         seraphis
+        seraphis_core
         seraphis_crypto
         cncrypto
         mx25519
@@ -397,6 +402,7 @@ if (BUILD_SAMPLE)
         hardforks
         seraphis_mocks
         seraphis
+        seraphis_core
         seraphis_crypto
         cncrypto
         mx25519
@@ -450,6 +456,7 @@ if (BUILD_SCRATCHPAD)
         hardforks
         seraphis_mocks
         seraphis
+        seraphis_core
         seraphis_crypto
         cncrypto
         mx25519

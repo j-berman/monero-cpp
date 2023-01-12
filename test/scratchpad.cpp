@@ -72,4 +72,12 @@ int main(int argc, const char* argv[]) {
 
   */
 
+  std::string balance = monero_utils::scan_chain(priv_spend_key, priv_view_key);
+  MINFO("Our total balance: " << balance);
+
+  /*
+
+    2023-01-12 10:13:18.677	I Our total balance: 1998184400000
+
+  */
 }
