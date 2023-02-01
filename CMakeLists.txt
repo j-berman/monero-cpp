@@ -266,9 +266,9 @@ add_library(randomx STATIC IMPORTED)
 set_target_properties(randomx PROPERTIES IMPORTED_LOCATION
     ${MONERO_PROJECT_BUILD}/external/randomx/librandomx.a)
     
-add_library(seraphis STATIC IMPORTED)
-set_target_properties(seraphis PROPERTIES IMPORTED_LOCATION
-    ${MONERO_PROJECT_BUILD}/src/seraphis/libseraphis.a)
+add_library(seraphis_main STATIC IMPORTED)
+set_target_properties(seraphis_main PROPERTIES IMPORTED_LOCATION
+    ${MONERO_PROJECT_BUILD}/src/seraphis_main/libseraphis_main.a)
 
 add_library(seraphis_core STATIC IMPORTED)
 set_target_properties(seraphis_core PROPERTIES IMPORTED_LOCATION
@@ -331,7 +331,7 @@ if (BUILD_LIBRARY)
         epee
         hardforks
         seraphis_mocks
-        seraphis
+        seraphis_main
         seraphis_core
         seraphis_crypto
         cncrypto
@@ -401,7 +401,7 @@ if (BUILD_SAMPLE)
         epee
         hardforks
         seraphis_mocks
-        seraphis
+        seraphis_main
         seraphis_core
         seraphis_crypto
         cncrypto
@@ -455,7 +455,7 @@ if (BUILD_SCRATCHPAD)
         epee
         hardforks
         seraphis_mocks
-        seraphis
+        seraphis_main
         seraphis_core
         seraphis_crypto
         cncrypto
