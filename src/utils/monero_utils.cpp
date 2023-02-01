@@ -666,7 +666,7 @@ struct scan_enote_helper_t
     std::vector<crypto::key_image> legacy_key_images;
 };
 
-void prepare_tx_for_enote_processing(
+void prepare_tx_for_enote_scanner(
     const uint64_t height,
     const uint64_t timestamp,
     const crypto::hash &tx_hash,
@@ -703,48 +703,42 @@ void set_records_and_key_images(
     const rct::key &legacy_base_spend_pubkey,
     const crypto::secret_key &legacy_view_privkey,
     const std::unordered_map<rct::key, cryptonote::subaddress_index> &legacy_subaddress_map,
-    const std::vector<scan_enote_helper_t> &scan_enote_helper,
+    const scan_enote_helper_t &seh,
     sp::EnoteScanningChunkLedgerV1 &chunk_out)
 {
-    for (const auto &seh : scan_enote_helper)
+    // always add an entry for a tx in the basic records map (since we save key images for every tx)
+    chunk_out.m_basic_records_per_tx[seh.tx_hash] = std::list<sp::ContextualBasicRecordVariant>{};
+
+    // find owned enotes from tx
+    if (seh.total_output_count_before_tx)
     {
-        // always add an entry for a tx in the basic records map (since we save key images for every tx)
-        if (chunk_out.m_basic_records_per_tx.find(seh.tx_hash) == chunk_out.m_basic_records_per_tx.end())
-        {
-            chunk_out.m_basic_records_per_tx[seh.tx_hash] = std::list<sp::ContextualBasicRecordVariant>{};
-        }
-
-        // find owned enotes from tx
-        if (seh.total_output_count_before_tx)
-        {
-            sp::try_find_legacy_enotes_in_tx(
-                legacy_base_spend_pubkey,
-                legacy_subaddress_map,
-                legacy_view_privkey,
-                seh.height,
-                seh.timestamp,
-                seh.tx_hash,
-                *(seh.total_output_count_before_tx),
-                seh.unlock_time,
-                seh.tx_extra,
-                seh.enotes,
-                sp::SpEnoteOriginStatus::ONCHAIN,
-                hw::get_device("default"),
-                chunk_out.m_basic_records_per_tx
-            );
-        }
-
-        // get ALL key images from the tx
-        sp::collect_key_images_from_tx(
+        sp::try_find_legacy_enotes_in_tx(
+            legacy_base_spend_pubkey,
+            legacy_subaddress_map,
+            legacy_view_privkey,
             seh.height,
             seh.timestamp,
             seh.tx_hash,
-            seh.legacy_key_images,
-            std::vector<crypto::key_image>(),
-            sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
-            chunk_out.m_contextual_key_images
+            *(seh.total_output_count_before_tx),
+            seh.unlock_time,
+            seh.tx_extra,
+            seh.enotes,
+            sp::SpEnoteOriginStatus::ONCHAIN,
+            hw::get_device("default"),
+            chunk_out.m_basic_records_per_tx
         );
     }
+
+    // get ALL key images from the tx
+    sp::collect_key_images_from_tx(
+        seh.height,
+        seh.timestamp,
+        seh.tx_hash,
+        seh.legacy_key_images,
+        std::vector<crypto::key_image>(),
+        sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
+        chunk_out.m_contextual_key_images
+    );
 }
 
 void prepare_chunk_out(
@@ -781,7 +775,7 @@ void prepare_chunk_out(
             const cryptonote::transaction &tx = block_pair.second[txIdx].first;
             boost::optional<uint64_t> total_output_count_before_tx = block_pair.second[txIdx].second;
             seh_v.emplace_back();
-            prepare_tx_for_enote_processing(height, block.timestamp, block.tx_hashes[txIdx], tx, total_output_count_before_tx, seh_v.back());
+            prepare_tx_for_enote_scanner(height, block.timestamp, block.tx_hashes[txIdx], tx, total_output_count_before_tx, seh_v.back());
         }
     }
 }
@@ -810,7 +804,8 @@ spends_and_receives_t monero_utils::identify_receives(const std::string &bin, co
   std::vector<scan_enote_helper_t> scan_enote_helper{};
   sp::EnoteScanningChunkLedgerV1 new_onchain_chunk{};
   prepare_chunk_out(blocks, scan_enote_helper, new_onchain_chunk);
-  set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, scan_enote_helper, new_onchain_chunk);
+  for (const auto &seh : scan_enote_helper)
+    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, seh, new_onchain_chunk);
 
   // process the chunk of records owned by the user (decrypt amounts)
   std::unordered_map<rct::key, sp::LegacyContextualIntermediateEnoteRecordV1> found_enote_records;
@@ -873,7 +868,9 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
   // get a chunk of records that are owned by the user (scan the blocks with the view key)
   std::vector<scan_enote_helper_t> scan_enote_helper{};
   sp::EnoteScanningChunkLedgerV1 new_onchain_chunk{};
-  set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, scan_enote_helper, new_onchain_chunk);
+  prepare_chunk_out(blocks, scan_enote_helper, new_onchain_chunk);
+  for (const auto &seh : scan_enote_helper)
+    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, seh, new_onchain_chunk);
 
   // process the chunk of records owned by the user (decrypt amounts, generate key images, and determine spends)
   std::unordered_map<rct::key, sp::LegacyContextualEnoteRecordV1> found_enote_records;
@@ -924,7 +921,7 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
 // EnoteFindingContextLedgerLegacy
 // - finds owned enotes from legacy view scanning
 ///
-class EnoteFindingContextLedgerLegacy final : public sp::EnoteFindingContextLedger
+class EnoteFindingContextLedgerLegacy final
 {
 public:
 //constructors
@@ -943,12 +940,6 @@ public:
     EnoteFindingContextLedgerLegacy& operator=(EnoteFindingContextLedgerLegacy&&) = delete;
 
 //member functions
-    /// get an onchain chunk (or empty chunk representing top of current chain)
-    void get_onchain_chunk(const std::uint64_t chunk_start_height,
-        const std::uint64_t chunk_max_size,
-        sp::EnoteScanningChunkLedgerV1 &chunk_out) const override {}
-    /// try to get an unconfirmed chunk (no-op for legacy scanning)
-    void get_unconfirmed_chunk(sp::EnoteScanningChunkNonLedgerV1 &chunk_out) const override {}
     /// scans enotes in a tx for basic records
     void find_basic_records(const scan_enote_helper_t &scan_enote_helper,
         std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> &basic_records) const;
@@ -1058,9 +1049,9 @@ void scan_legacy_chunk(
     if (!waiter.wait())
         throw std::runtime_error("Failed waiting for onchain chunk request");
 
-    for (const auto &basic_records_per_tx : basic_records_per_tx_v)
+    for (auto &basic_records_per_tx : basic_records_per_tx_v)
     {
-        for (const auto &brpt : basic_records_per_tx)
+        for (auto &brpt : basic_records_per_tx)
         {
             chunk_out.m_basic_records_per_tx[brpt.first] = std::move(brpt.second);
         }
@@ -1158,10 +1149,10 @@ public:
             m_top_known_block_id = chunk_out.m_block_ids.back();
         }
     }
-    /// try to get a scanning chunk for the unconfirmed txs in a ledger
+    /// TODO: get a scanning chunk for the unconfirmed txs in a ledger
     void get_unconfirmed_chunk(sp::EnoteScanningChunkNonLedgerV1 &chunk_out) override
     {
-        m_enote_finding_context.get_unconfirmed_chunk(chunk_out);
+        return;
     }
     /// stop the current scanning process (should be no-throw no-fail)
     void terminate_scanning() override { /* no-op */ }
