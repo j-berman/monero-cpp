@@ -394,26 +394,26 @@ void add_default_subaddresses(
             rct::key legacy_subaddress_spendkey;
 
             sp::make_legacy_subaddress_spendkey(
-                legacy_base_spend_pubkey,
-                legacy_view_privkey,
-                subaddr_index,
-                hw::get_device("default"),
-                legacy_subaddress_spendkey
-            );
+                    legacy_base_spend_pubkey,
+                    legacy_view_privkey,
+                    subaddr_index,
+                    hw::get_device("default"),
+                    legacy_subaddress_spendkey
+                );
 
             legacy_subaddress_map[legacy_subaddress_spendkey] = subaddr_index;
         }
     }
 };
 
-typedef std::vector<std::pair<cryptonote::block, std::vector<std::pair<cryptonote::transaction, boost::optional<uint64_t>>>>> parsed_blocks_t;
+typedef std::vector<std::pair<cryptonote::block, std::vector<std::pair<cryptonote::transaction, uint64_t>>>> parsed_blocks_t;
 
 void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res, parsed_blocks_t &blocks)
 {
   // parse blocks and txs
   blocks.clear();
   blocks.reserve(res.blocks.size());
-  for (int blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
+  for (size_t blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
   {
     cryptonote::block block;
     if (!cryptonote::parse_and_validate_block_from_blob(res.blocks[blockIdx].block, block))
@@ -421,9 +421,9 @@ void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &r
       throw std::runtime_error("failed to parse block blob at index " + std::to_string(blockIdx));
     }
 
-    std::vector<std::pair<cryptonote::transaction, boost::optional<uint64_t>>> txs;
+    std::vector<std::pair<cryptonote::transaction, uint64_t>> txs;
     txs.reserve(res.blocks[blockIdx].txs.size());
-    for (int txIdx = 0; txIdx < res.blocks[blockIdx].txs.size(); txIdx++)
+    for (size_t txIdx = 0; txIdx < res.blocks[blockIdx].txs.size(); txIdx++)
     {
       cryptonote::transaction tx;
       if (!cryptonote::parse_and_validate_tx_base_from_blob(res.blocks[blockIdx].txs[txIdx].blob, tx))
@@ -431,10 +431,11 @@ void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &r
         throw std::runtime_error("failed to parse tx blob at index " + std::to_string(txIdx));
       }
 
-      // total_output_count_before_tx == global output index of first output in tx
-      boost::optional<uint64_t> total_output_count_before_tx = !res.output_indices[blockIdx].indices[txIdx].indices.empty()
-        ? boost::optional<uint64_t>(res.output_indices[blockIdx].indices[txIdx].indices[0])
-        : boost::none;
+      // total_output_count_before_tx == global output index of first output in tx.
+      // Some txs have no enotes, in which case we set this value to 0 as it isn't useful
+      uint64_t total_output_count_before_tx = !res.output_indices[blockIdx].indices[txIdx].indices.empty()
+          ? res.output_indices[blockIdx].indices[txIdx].indices[0]
+          : 0;
 
       txs.emplace_back(std::make_pair(std::move(tx), std::move(total_output_count_before_tx)));
     }
@@ -447,35 +448,38 @@ void parse_get_blocks(tools::threadpool &tpool, tools::threadpool::waiter &waite
 {
     // parse blocks and txs
     blocks.resize(res.blocks.size());
-    for (int blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
+    for (size_t blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
     {
         tpool.submit(&waiter, [&, blockIdx]{
-            if (!cryptonote::parse_and_validate_block_from_blob(res.blocks[blockIdx].block, blocks[blockIdx].first))
-            {
-                throw std::runtime_error("failed to parse block blob at index " + std::to_string(blockIdx));
-            }
-        }, true);
-      }
+                if (!cryptonote::parse_and_validate_block_from_blob(res.blocks[blockIdx].block, blocks[blockIdx].first))
+                {
+                    throw std::runtime_error("failed to parse block blob at index " + std::to_string(blockIdx));
+                }
+            }, true);
+    }
     if (!waiter.wait())
         throw std::runtime_error("Failed waiting to parse blocks");
 
     // parse txs
-    for (int blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
+    for (size_t blockIdx = 0; blockIdx < res.blocks.size(); blockIdx++)
     {
         blocks[blockIdx].second.resize(res.blocks[blockIdx].txs.size());
-        for (int txIdx = 0; txIdx < res.blocks[blockIdx].txs.size(); txIdx++)
+        for (size_t txIdx = 0; txIdx < res.blocks[blockIdx].txs.size(); txIdx++)
         {
             tpool.submit(&waiter, [&, blockIdx, txIdx]{
-                if (!cryptonote::parse_and_validate_tx_base_from_blob(res.blocks[blockIdx].txs[txIdx].blob, blocks[blockIdx].second[txIdx].first))
-                {
-                    throw std::runtime_error("failed to parse tx blob at index " + std::to_string(txIdx));
-                }
+                    cryptonote::transaction tx;
+                    if (!cryptonote::parse_and_validate_tx_base_from_blob(res.blocks[blockIdx].txs[txIdx].blob, tx))
+                    {
+                        throw std::runtime_error("failed to parse tx blob at index " + std::to_string(txIdx));
+                    }
+                    blocks[blockIdx].second[txIdx].first = std::move(tx);
 
-                // total_output_count_before_tx == global output index of first output in tx
-                blocks[blockIdx].second[txIdx].second = !res.output_indices[blockIdx].indices[txIdx].indices.empty()
-                    ? boost::optional<uint64_t>(res.output_indices[blockIdx].indices[txIdx].indices[0])
-                    : boost::none;
-            }, true);
+                    // total_output_count_before_tx == global output index of first output in tx.
+                    // Some txs have no enotes, in which case we set this value to 0 as it isn't useful
+                    blocks[blockIdx].second[txIdx].second = !res.output_indices[blockIdx].indices[txIdx].indices.empty()
+                        ? res.output_indices[blockIdx].indices[txIdx].indices[0]
+                        : 0;
+                }, true);
         }
     }
     if (!waiter.wait())
@@ -654,48 +658,48 @@ void outs_to_enotes(const cryptonote::transaction &tx, std::vector<sp::LegacyEno
     }
 }
 
-struct scan_enote_helper_t
+struct tx_to_scan_t
 {
     rct::key tx_hash;
     uint64_t height;
     uint64_t timestamp;
-    boost::optional<uint64_t> total_output_count_before_tx;
+    uint64_t total_output_count_before_tx;
     uint64_t unlock_time;
     sp::TxExtra tx_extra;
     std::vector<sp::LegacyEnoteVariant> enotes;
     std::vector<crypto::key_image> legacy_key_images;
 };
 
-void prepare_tx_for_enote_scanner(
+void prepare_tx_for_scanner(
     const uint64_t height,
     const uint64_t timestamp,
     const crypto::hash &tx_hash,
     const cryptonote::transaction &tx,
-    const boost::optional<uint64_t> total_output_count_before_tx,
-    scan_enote_helper_t &seh)
+    const uint64_t total_output_count_before_tx,
+    tx_to_scan_t &tx_to_scan)
 {
-    seh = scan_enote_helper_t{};
+    tx_to_scan = tx_to_scan_t{};
 
-    seh.height = height;
-    seh.timestamp = timestamp;
-    seh.tx_hash = rct::hash2rct(tx_hash);
-    seh.total_output_count_before_tx = total_output_count_before_tx;
-    seh.unlock_time = tx.unlock_time;
+    tx_to_scan.height = height;
+    tx_to_scan.timestamp = timestamp;
+    tx_to_scan.tx_hash = rct::hash2rct(tx_hash);
+    tx_to_scan.total_output_count_before_tx = total_output_count_before_tx;
+    tx_to_scan.unlock_time = tx.unlock_time;
 
-    seh.tx_extra = sp::TxExtra(
-        (const unsigned char *) tx.extra.data(),
-        (const unsigned char *) tx.extra.data() + tx.extra.size()
-    );
+    tx_to_scan.tx_extra = sp::TxExtra(
+            (const unsigned char *) tx.extra.data(),
+            (const unsigned char *) tx.extra.data() + tx.extra.size()
+        );
 
-    outs_to_enotes(tx, seh.enotes);
+    outs_to_enotes(tx, tx_to_scan.enotes);
 
-    seh.legacy_key_images.reserve(tx.vin.size());
+    tx_to_scan.legacy_key_images.reserve(tx.vin.size());
     for (const auto &in: tx.vin)
     {
         if (in.type() != typeid(cryptonote::txin_to_key))
             continue;
         const auto &txin = boost::get<cryptonote::txin_to_key>(in);
-        seh.legacy_key_images.emplace_back(txin.k_image);
+        tx_to_scan.legacy_key_images.emplace_back(txin.k_image);
     }
 }
 
@@ -703,47 +707,46 @@ void set_records_and_key_images(
     const rct::key &legacy_base_spend_pubkey,
     const crypto::secret_key &legacy_view_privkey,
     const std::unordered_map<rct::key, cryptonote::subaddress_index> &legacy_subaddress_map,
-    const scan_enote_helper_t &seh,
+    const tx_to_scan_t &tx_to_scan,
     sp::EnoteScanningChunkLedgerV1 &chunk_out)
 {
-    // always add an entry for a tx in the basic records map (since we save key images for every tx)
-    chunk_out.m_basic_records_per_tx[seh.tx_hash] = std::list<sp::ContextualBasicRecordVariant>{};
-
     // find owned enotes from tx
-    if (seh.total_output_count_before_tx)
-    {
-        sp::try_find_legacy_enotes_in_tx(
+    std::list<sp::ContextualBasicRecordVariant> collected_records;
+    sp::try_find_legacy_enotes_in_tx(
             legacy_base_spend_pubkey,
             legacy_subaddress_map,
             legacy_view_privkey,
-            seh.height,
-            seh.timestamp,
-            seh.tx_hash,
-            *(seh.total_output_count_before_tx),
-            seh.unlock_time,
-            seh.tx_extra,
-            seh.enotes,
+            tx_to_scan.height,
+            tx_to_scan.timestamp,
+            tx_to_scan.tx_hash,
+            tx_to_scan.total_output_count_before_tx,
+            tx_to_scan.unlock_time,
+            tx_to_scan.tx_extra,
+            tx_to_scan.enotes,
             sp::SpEnoteOriginStatus::ONCHAIN,
             hw::get_device("default"),
-            chunk_out.m_basic_records_per_tx
+            collected_records
         );
-    }
+    chunk_out.m_basic_records_per_tx[tx_to_scan.tx_hash] = std::move(collected_records);
 
     // get ALL key images from the tx
-    sp::collect_key_images_from_tx(
-        seh.height,
-        seh.timestamp,
-        seh.tx_hash,
-        seh.legacy_key_images,
-        std::vector<crypto::key_image>(),
-        sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
-        chunk_out.m_contextual_key_images
-    );
+    sp::SpContextualKeyImageSetV1 collected_key_images;
+    if (sp::try_collect_key_images_from_tx(
+            tx_to_scan.height,
+            tx_to_scan.timestamp,
+            tx_to_scan.tx_hash,
+            tx_to_scan.legacy_key_images,
+            std::vector<crypto::key_image>(),
+            sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
+            collected_key_images))
+    {
+        chunk_out.m_contextual_key_images.emplace_back(std::move(collected_key_images));
+    }
 }
 
 void prepare_chunk_out(
     const parsed_blocks_t &blocks,
-    std::vector<scan_enote_helper_t> &seh_v,
+    std::vector<tx_to_scan_t> &txs_to_scan,
     sp::EnoteScanningChunkLedgerV1 &chunk_out)
 {
     chunk_out.m_basic_records_per_tx.clear();
@@ -773,16 +776,17 @@ void prepare_chunk_out(
         for (size_t txIdx = 0; txIdx < block_pair.second.size(); ++txIdx)
         {
             const cryptonote::transaction &tx = block_pair.second[txIdx].first;
-            boost::optional<uint64_t> total_output_count_before_tx = block_pair.second[txIdx].second;
-            seh_v.emplace_back();
-            prepare_tx_for_enote_scanner(height, block.timestamp, block.tx_hashes[txIdx], tx, total_output_count_before_tx, seh_v.back());
+            uint64_t total_output_count_before_tx = block_pair.second[txIdx].second;
+            tx_to_scan_t tx_to_scan;
+            prepare_tx_for_scanner(height, block.timestamp, block.tx_hashes[txIdx], tx, total_output_count_before_tx, tx_to_scan);
+            txs_to_scan.emplace_back(std::move(tx_to_scan));
         }
     }
 }
 
-spends_and_receives_t monero_utils::identify_receives(const std::string &bin, const std::string &legacy_base_spend_pubkey_str, const std::string &legacy_view_privkey_str)
+receives_t monero_utils::identify_receives(const std::string &bin, const std::string &legacy_base_spend_pubkey_str, const std::string &legacy_view_privkey_str)
 {
-  spends_and_receives_t result;
+  receives_t result;
 
   // load binary rpc response to struct
   cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response resp_struct;
@@ -801,11 +805,11 @@ spends_and_receives_t monero_utils::identify_receives(const std::string &bin, co
   add_default_subaddresses(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map);
 
   // get a chunk of records that are owned by the user (scan the blocks with the view key)
-  std::vector<scan_enote_helper_t> scan_enote_helper{};
+  std::vector<tx_to_scan_t> txs_to_scan{};
   sp::EnoteScanningChunkLedgerV1 new_onchain_chunk{};
-  prepare_chunk_out(blocks, scan_enote_helper, new_onchain_chunk);
-  for (const auto &seh : scan_enote_helper)
-    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, seh, new_onchain_chunk);
+  prepare_chunk_out(blocks, txs_to_scan, new_onchain_chunk);
+  for (const auto &tx_to_scan : txs_to_scan)
+    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, tx_to_scan, new_onchain_chunk);
 
   // process the chunk of records owned by the user (decrypt amounts)
   std::unordered_map<rct::key, sp::LegacyContextualIntermediateEnoteRecordV1> found_enote_records;
@@ -829,18 +833,20 @@ spends_and_receives_t monero_utils::identify_receives(const std::string &bin, co
   for (const auto &enote_record : found_enote_records)
   {
     result.push_back({
-      false, // spend?
       epee::string_tools::pod_to_hex(enote_record.second.m_origin_context.m_transaction_id), // tx id
       epee::string_tools::pod_to_hex(sp::onetime_address_ref(enote_record.second.m_record.m_enote)), // output pub key
+      "unknown", // key image
+      enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->major : 0, // subaddr major
+      enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->minor : 0, // subaddr minor
       enote_record.second.m_origin_context.m_block_height, // block height
-      enote_record.second.m_record.m_amount // amount
+      enote_record.second.m_record.m_amount, // amount
     });
   }
 
   return result;
 }
 
-spends_and_receives_t monero_utils::identify_spends_and_receives(const std::string &bin, const std::string &legacy_spend_privkey_str, const std::string &legacy_view_privkey_str)
+spends_and_receives_t monero_utils::identify_spends_and_receives(const std::string &bin, const std::string &legacy_spend_privkey_str, const std::string &legacy_view_privkey_str, const std::vector<std::string> &key_images_str)
 {
   spends_and_receives_t result;
 
@@ -862,15 +868,25 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
   crypto::secret_key legacy_view_privkey;
   epee::string_tools::hex_to_pod(legacy_view_privkey_str, legacy_view_privkey);
 
+  /// key images
+  std::unordered_set<crypto::key_image> key_images;
+  key_images.reserve(key_images_str.size());
+  for (const auto &key_image_str : key_images_str)
+  {
+    crypto::key_image key_image;
+    epee::string_tools::hex_to_pod(key_image_str, key_image);
+    key_images.insert(std::move(key_image));
+  }
+
   std::unordered_map<rct::key, cryptonote::subaddress_index> legacy_subaddress_map{};
   add_default_subaddresses(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map);
 
   // get a chunk of records that are owned by the user (scan the blocks with the view key)
-  std::vector<scan_enote_helper_t> scan_enote_helper{};
+  std::vector<tx_to_scan_t> txs_to_scan{};
   sp::EnoteScanningChunkLedgerV1 new_onchain_chunk{};
-  prepare_chunk_out(blocks, scan_enote_helper, new_onchain_chunk);
-  for (const auto &seh : scan_enote_helper)
-    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, seh, new_onchain_chunk);
+  prepare_chunk_out(blocks, txs_to_scan, new_onchain_chunk);
+  for (const auto &tx_to_scan : txs_to_scan)
+    set_records_and_key_images(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map, tx_to_scan, new_onchain_chunk);
 
   // process the chunk of records owned by the user (decrypt amounts, generate key images, and determine spends)
   std::unordered_map<rct::key, sp::LegacyContextualEnoteRecordV1> found_enote_records;
@@ -881,8 +897,7 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
     legacy_view_privkey,
     [&](const crypto::key_image &key_image) -> bool
     {
-      // TODO: check if key image is known from prior received enotes
-      return false;
+      return key_images.find(key_image) != key_images.end();
     },
     new_onchain_chunk.m_basic_records_per_tx,
     new_onchain_chunk.m_contextual_key_images,
@@ -894,22 +909,25 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
   // pack the response
   for (const auto &enote_record : found_enote_records)
   {
-    result.push_back({
-      false, // spend?
+    result.second.push_back({
       epee::string_tools::pod_to_hex(enote_record.second.m_origin_context.m_transaction_id), // tx id
       epee::string_tools::pod_to_hex(sp::onetime_address_ref(enote_record.second.m_record.m_enote)), // output pub key
+      epee::string_tools::pod_to_hex(enote_record.second.m_record.m_key_image), // key image
+      enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->major : 0, // subaddr major
+      enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->minor : 0, // subaddr minor
       enote_record.second.m_origin_context.m_block_height, // block height
       enote_record.second.m_record.m_amount, // amount
     });
+  }
 
-    if (enote_record.second.m_spent_context.m_spent_status == sp::SpEnoteSpentStatus::SPENT_ONCHAIN)
+  for (const auto &spent_key_image_info : found_spent_key_images)
+  {
+    if (spent_key_image_info.second.m_spent_status == sp::SpEnoteSpentStatus::SPENT_ONCHAIN)
     {
-      result.push_back({
-        true, // spend?
-        epee::string_tools::pod_to_hex(enote_record.second.m_spent_context.m_transaction_id), // tx id
-        epee::string_tools::pod_to_hex(sp::onetime_address_ref(enote_record.second.m_record.m_enote)), // output pub key
-        enote_record.second.m_spent_context.m_block_height, // block height
-        enote_record.second.m_record.m_amount, // amount
+      result.first.push_back({
+        epee::string_tools::pod_to_hex(spent_key_image_info.second.m_transaction_id), // tx id
+        epee::string_tools::pod_to_hex(spent_key_image_info.first), // key image
+        spent_key_image_info.second.m_block_height, // block height
       });
     }
   }
@@ -941,8 +959,8 @@ public:
 
 //member functions
     /// scans enotes in a tx for basic records
-    void find_basic_records(const scan_enote_helper_t &scan_enote_helper,
-        std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> &basic_records) const;
+    void find_basic_records(const tx_to_scan_t &tx_to_scan,
+        std::list<sp::ContextualBasicRecordVariant> &collected_records) const;
 
 //member variables
 private:
@@ -952,35 +970,31 @@ private:
 };
 
 void EnoteFindingContextLedgerLegacy::find_basic_records(
-    const scan_enote_helper_t &seh,
-    std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> &basic_records) const
+    const tx_to_scan_t &tx_to_scan,
+    std::list<sp::ContextualBasicRecordVariant> &collected_records) const
 {
-    if (seh.total_output_count_before_tx)
-    {
-        // find owned enotes from tx
-        sp::try_find_legacy_enotes_in_tx(
+    // find owned enotes from tx
+    sp::try_find_legacy_enotes_in_tx(
             m_legacy_base_spend_pubkey,
             m_legacy_subaddress_map,
             m_legacy_view_privkey,
-            seh.height,
-            seh.timestamp,
-            seh.tx_hash,
-            *(seh.total_output_count_before_tx),
-            seh.unlock_time,
-            seh.tx_extra,
-            seh.enotes,
+            tx_to_scan.height,
+            tx_to_scan.timestamp,
+            tx_to_scan.tx_hash,
+            tx_to_scan.total_output_count_before_tx,
+            tx_to_scan.unlock_time,
+            tx_to_scan.tx_extra,
+            tx_to_scan.enotes,
             sp::SpEnoteOriginStatus::ONCHAIN,
             hw::get_device("default"),
-            basic_records
+            collected_records
         );
-    }
 }
 
 typedef std::pair<parsed_blocks_t, uint64_t/*height*/> onchain_chunk_t;
 
 void request_onchain_chunk(
     const std::uint64_t chunk_start_height,
-    const std::uint64_t chunk_max_size,
     const std::unique_ptr<epee::net_utils::http::abstract_http_client> &http_client,
     cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res)
 {
@@ -1015,47 +1029,48 @@ void scan_legacy_chunk(
     parse_get_blocks(tpool, waiter, chunk_to_scan, blocks);
 
     // prepare chunk for scanning
-    std::vector<scan_enote_helper_t> scan_enote_helper{};
-    prepare_chunk_out(blocks, scan_enote_helper, chunk_out);
+    std::vector<tx_to_scan_t> txs_to_scan{};
+    prepare_chunk_out(blocks, txs_to_scan, chunk_out);
 
     // scan each tx
-    std::vector<std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>>> basic_records_per_tx_v;
-    basic_records_per_tx_v.reserve(scan_enote_helper.size());
-    for (const auto &seh : scan_enote_helper)
+    std::vector<std::pair<rct::key, std::list<sp::ContextualBasicRecordVariant>>> basic_records_per_tx;
+    basic_records_per_tx.resize(txs_to_scan.size());
+    for (size_t i = 0; i < txs_to_scan.size(); i++)
     {
-        chunk_out.m_basic_records_per_tx[seh.tx_hash] = std::list<sp::ContextualBasicRecordVariant>{};
+        const tx_to_scan_t &tx_to_scan = txs_to_scan[i];
 
-        if (seh.total_output_count_before_tx)
+        if (tx_to_scan.enotes.size() > 0)
         {
-            basic_records_per_tx_v.emplace_back();
-            tpool.submit(&waiter, [&]{
-                // writing to containers isn't thread safe; writing to a single
-                // container from multiple threads is undefined behavior. Referencing
-                // a fresh single-use container here is a hack for thread safety.
-                enote_finding_context.find_basic_records(seh, basic_records_per_tx_v.back());
-            }, true);
+            tpool.submit(&waiter, [&, i]{
+                    std::list<sp::ContextualBasicRecordVariant> collected_records;
+                    enote_finding_context.find_basic_records(txs_to_scan[i], collected_records);
+                    basic_records_per_tx[i] = {txs_to_scan[i].tx_hash, std::move(collected_records)};
+                }, true);
+        }
+        else
+        {
+            // always add an entry for tx in the basic records map (since we save key images for every tx)
+            basic_records_per_tx[i] = {tx_to_scan.tx_hash, std::list<sp::ContextualBasicRecordVariant>{}};
         }
 
-        sp::collect_key_images_from_tx(
-            seh.height,
-            seh.timestamp,
-            seh.tx_hash,
-            seh.legacy_key_images,
-            std::vector<crypto::key_image>(),
-            sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
-            chunk_out.m_contextual_key_images
-        );
+        sp::SpContextualKeyImageSetV1 collected_key_images;
+        if (sp::try_collect_key_images_from_tx(
+                tx_to_scan.height,
+                tx_to_scan.timestamp,
+                tx_to_scan.tx_hash,
+                tx_to_scan.legacy_key_images,
+                std::vector<crypto::key_image>(),
+                sp::SpEnoteSpentStatus::SPENT_ONCHAIN,
+                collected_key_images))
+        {
+            chunk_out.m_contextual_key_images.emplace_back(std::move(collected_key_images));
+        }
     }
     if (!waiter.wait())
         throw std::runtime_error("Failed waiting for onchain chunk request");
 
-    for (auto &basic_records_per_tx : basic_records_per_tx_v)
-    {
-        for (auto &brpt : basic_records_per_tx)
-        {
-            chunk_out.m_basic_records_per_tx[brpt.first] = std::move(brpt.second);
-        }
-    }
+    for (auto &brpt : basic_records_per_tx)
+        chunk_out.m_basic_records_per_tx[brpt.first] = std::move(brpt.second);
 }
 
 ////
@@ -1069,6 +1084,7 @@ public:
 //constructor
     EnoteScanningContextLedgerMultithreaded(const EnoteFindingContextLedgerLegacy &enote_finding_context):
         m_enote_finding_context{enote_finding_context},
+        m_tpool{tools::threadpool::getInstance()},
         m_network_waiter{m_tpool},
         m_local_scanner_waiter(m_tpool)
     {
@@ -1089,8 +1105,6 @@ public:
     /// - starting past the end of the last chunk acquired since starting to scan
     void get_onchain_chunk(sp::EnoteScanningChunkLedgerV1 &chunk_out) override
     {
-        MINFO("Scanning " << m_next_start_height);
-
         chunk_out.m_basic_records_per_tx.clear();
         chunk_out.m_contextual_key_images.clear();
         chunk_out.m_block_ids.clear();
@@ -1107,7 +1121,7 @@ public:
             m_http_client->set_server("127.0.0.1:18081", boost::optional<epee::net_utils::http::login>(), epee::net_utils::ssl_support_t::e_ssl_support_disabled);
 
             // request the first chunk from the daemon synchronously
-            request_onchain_chunk(m_next_start_height, m_max_chunk_size, m_http_client, m_onchain_chunk_to_scan);
+            request_onchain_chunk(m_next_start_height, m_http_client, m_onchain_chunk_to_scan);
             m_made_first_request = true;
         }
         else
@@ -1129,7 +1143,7 @@ public:
         }
         else
         {
-            m_next_start_height = m_next_start_height + chunk_to_scan.blocks.size();
+            m_next_start_height += chunk_to_scan.blocks.size();
 
             // check if this chunk is the last chunk we need to scan
             if (m_next_start_height >= m_chain_height)
@@ -1141,8 +1155,8 @@ public:
             {
                 // async request for the next chunk if this chunk isn't the last chunk
                 m_tpool.submit(&m_network_waiter, [&]{
-                    request_onchain_chunk(m_next_start_height, m_max_chunk_size, m_http_client, m_onchain_chunk_to_scan);
-                }, true);
+                        request_onchain_chunk(m_next_start_height, m_http_client, m_onchain_chunk_to_scan);
+                    }, true);
             }
 
             scan_legacy_chunk(m_tpool, m_local_scanner_waiter, chunk_to_scan, m_enote_finding_context, chunk_out);
@@ -1167,14 +1181,14 @@ private:
     bool m_made_first_request{false};
     bool m_finished_scanning{false};
 
-    tools::threadpool &m_tpool = tools::threadpool::getInstance();
+    tools::threadpool &m_tpool;
     tools::threadpool::waiter m_network_waiter;
     tools::threadpool::waiter m_local_scanner_waiter;
 
     cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response m_onchain_chunk_to_scan;
 
     std::uint64_t m_next_start_height{0};
-    std::uint64_t m_max_chunk_size{0};
+    std::uint64_t m_max_chunk_size{0}; // TODO: use this
     std::uint64_t m_chain_height{static_cast<std::uint64_t>(-1)};
     rct::key m_top_known_block_id{rct::zero()};
 
@@ -1198,7 +1212,7 @@ std::string monero_utils::scan_chain(const std::string &legacy_spend_privkey_str
 
   const sp::RefreshLedgerEnoteStoreConfig refresh_config{
           .m_reorg_avoidance_depth = 1,
-          .m_max_chunk_size = 1, // TODO: investigate why is this not being used in the scanning context? is it even necessary?
+          .m_max_chunk_size = 1000,
           .m_max_partialscan_attempts = 0
       };
 
