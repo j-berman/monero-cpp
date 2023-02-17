@@ -377,6 +377,8 @@ std::shared_ptr<monero_tx> monero_utils::cn_tx_to_tx(const cryptonote::transacti
 //  mutable size_t blob_size;
 }
 
+// TODO: make sure throws don't introduce a potential DoS
+
 void add_default_subaddresses(
     const rct::key &legacy_base_spend_pubkey,
     const crypto::secret_key &legacy_view_privkey,
@@ -561,6 +563,8 @@ bool try_out_to_legacy_enote_v2(const cryptonote::transaction &tx, const size_t 
         return false;
      if (!is_legacy_enote_v2(tx, tx.vout[output_index]))
         return false;
+    if (output_index >= tx.rct_signatures.outPk.size() || output_index >= tx.rct_signatures.ecdhInfo.size())
+      return false;
 
     sp::LegacyEnoteV2 enote_v2;
 
@@ -585,6 +589,8 @@ bool try_out_to_legacy_enote_v3(const cryptonote::transaction &tx, const size_t 
         return false;
     if (!is_legacy_enote_v3(tx, tx.vout[output_index]))
         return false;
+    if (output_index >= tx.rct_signatures.outPk.size() || output_index >= tx.rct_signatures.ecdhInfo.size())
+      return false;
 
     sp::LegacyEnoteV3 enote_v3;
 
@@ -630,6 +636,8 @@ bool try_out_to_legacy_enote_v5(const cryptonote::transaction &tx, const size_t 
         return false;
     if (!is_legacy_enote_v5(tx, tx.vout[output_index]))
         return false;
+    if (output_index >= tx.rct_signatures.outPk.size() || output_index >= tx.rct_signatures.ecdhInfo.size())
+      return false;
 
     sp::LegacyEnoteV5 enote_v5;
 
@@ -788,40 +796,45 @@ void prepare_chunk_out(
     }
 }
 
-void preprocess_chunk_out(
-    const parsed_blocks_t &blocks,
-    /// keys
+void view_scan_legacy_chunk(
+    const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &chunk_to_scan,
     const rct::key &legacy_base_spend_pubkey,
     const crypto::secret_key &legacy_view_privkey,
     const std::unordered_map<rct::key, cryptonote::subaddress_index> &legacy_subaddress_map,
-    /// block metadata
-    std::vector<rct::key> &block_ids,
-    uint64_t &start_height,
-    uint64_t &end_height,
-    rct::key &prefix_block_id,
-    /// collected data
     std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> &basic_records_per_tx,
     std::list<sp::SpContextualKeyImageSetV1> &contextual_key_images)
 {
-    // prepare blocks for scanning
-    std::vector<tx_to_scan_t> txs_to_scan{};
-    prepare_chunk_out(blocks, block_ids, start_height, end_height, prefix_block_id, txs_to_scan);
+    // parse the chunk
+    parsed_blocks_t blocks;
+    parse_get_blocks(chunk_to_scan, blocks);
 
-    // scan txs
-    for (const auto &tx_to_scan : txs_to_scan)
+    // scan block by block
+    for (size_t i = 0; i < blocks.size(); ++i)
     {
-        std::list<sp::ContextualBasicRecordVariant> collected_records;
-        sp::SpContextualKeyImageSetV1 collected_key_images;
-        collect_records_and_key_images(
-            legacy_base_spend_pubkey,
-            legacy_view_privkey,
-            legacy_subaddress_map,
-            tx_to_scan,
-            collected_records,
-            collected_key_images);
+        const auto &block_pair = blocks[i];
+        const cryptonote::block &block = block_pair.first;
+        uint64_t block_index = cryptonote::get_block_height(block);
 
-        basic_records_per_tx[tx_to_scan.tx_hash] = std::move(collected_records);
-        contextual_key_images.emplace_back(std::move(collected_key_images));
+        for (size_t tx_idx = 0; tx_idx < block_pair.second.size(); ++tx_idx)
+        {
+            const cryptonote::transaction &tx = block_pair.second[tx_idx].first;
+            uint64_t total_output_count_before_tx = block_pair.second[tx_idx].second;
+            tx_to_scan_t tx_to_scan;
+            prepare_tx_for_scanner(block_index, block.timestamp, block.tx_hashes[tx_idx], tx, total_output_count_before_tx, tx_to_scan);
+
+            std::list<sp::ContextualBasicRecordVariant> collected_records;
+            sp::SpContextualKeyImageSetV1 collected_key_images;
+            collect_records_and_key_images(
+                legacy_base_spend_pubkey,
+                legacy_view_privkey,
+                legacy_subaddress_map,
+                tx_to_scan,
+                collected_records,
+                collected_key_images);
+
+            basic_records_per_tx[tx_to_scan.tx_hash] = std::move(collected_records);
+            contextual_key_images.emplace_back(std::move(collected_key_images));
+        }
     }
 }
 
@@ -830,11 +843,8 @@ receives_t monero_utils::identify_receives(const std::string &bin, const std::st
   receives_t result;
 
   // load binary rpc response to struct
-  cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response resp_struct;
-  epee::serialization::load_t_from_binary(resp_struct, bin);
-
-  parsed_blocks_t blocks;
-  parse_get_blocks(resp_struct, blocks);
+  cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response chunk_to_scan;
+  epee::serialization::load_t_from_binary(chunk_to_scan, bin);
 
   // load keys
   rct::key legacy_base_spend_pubkey;
@@ -846,18 +856,15 @@ receives_t monero_utils::identify_receives(const std::string &bin, const std::st
   add_default_subaddresses(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map);
 
   // get a chunk of records that are owned by the user (scan the blocks with the view key)
-  sp::EnoteScanningChunkLedgerV1 chunk_out{};
-  preprocess_chunk_out(
-      blocks,
+  std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> basic_records_per_tx;
+  std::list<sp::SpContextualKeyImageSetV1> contextual_key_images;
+  view_scan_legacy_chunk(
+      chunk_to_scan,
       legacy_base_spend_pubkey,
       legacy_view_privkey,
       legacy_subaddress_map,
-      chunk_out.m_block_ids,
-      chunk_out.m_start_height,
-      chunk_out.m_end_height,
-      chunk_out.m_prefix_block_id,
-      chunk_out.m_basic_records_per_tx,
-      chunk_out.m_contextual_key_images);
+      basic_records_per_tx,
+      contextual_key_images);
 
   // process the chunk of records owned by the user (decrypt amounts)
   std::unordered_map<rct::key, sp::LegacyContextualIntermediateEnoteRecordV1> found_enote_records;
@@ -870,8 +877,8 @@ receives_t monero_utils::identify_receives(const std::string &bin, const std::st
       // no need to check key images, only care about receives
       return false;
     },
-    chunk_out.m_basic_records_per_tx,
-    chunk_out.m_contextual_key_images,
+    basic_records_per_tx,
+    contextual_key_images,
     hw::get_device("default"),
     found_enote_records,
     found_spent_key_images
@@ -899,10 +906,8 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
   spends_and_receives_t result;
 
   // load binary rpc response to struct
-  cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response resp_struct;
-  epee::serialization::load_t_from_binary(resp_struct, bin);
-  parsed_blocks_t blocks;
-  parse_get_blocks(resp_struct, blocks);
+  cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response chunk_to_scan;
+  epee::serialization::load_t_from_binary(chunk_to_scan, bin);
 
   // load keys
   /// spend key
@@ -930,18 +935,15 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
   add_default_subaddresses(legacy_base_spend_pubkey, legacy_view_privkey, legacy_subaddress_map);
 
   // get a chunk of records that are owned by the user (scan the blocks with the view key)
-  sp::EnoteScanningChunkLedgerV1 chunk_out{};
-  preprocess_chunk_out(
-      blocks,
+  std::unordered_map<rct::key, std::list<sp::ContextualBasicRecordVariant>> basic_records_per_tx;
+  std::list<sp::SpContextualKeyImageSetV1> contextual_key_images;
+  view_scan_legacy_chunk(
+      chunk_to_scan,
       legacy_base_spend_pubkey,
       legacy_view_privkey,
       legacy_subaddress_map,
-      chunk_out.m_block_ids,
-      chunk_out.m_start_height,
-      chunk_out.m_end_height,
-      chunk_out.m_prefix_block_id,
-      chunk_out.m_basic_records_per_tx,
-      chunk_out.m_contextual_key_images);
+      basic_records_per_tx,
+      contextual_key_images);
 
   // process the chunk of records owned by the user (decrypt amounts, generate key images, and determine spends)
   std::unordered_map<rct::key, sp::LegacyContextualEnoteRecordV1> found_enote_records;
@@ -954,8 +956,8 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
     {
       return key_images.find(key_image) != key_images.end();
     },
-    chunk_out.m_basic_records_per_tx,
-    chunk_out.m_contextual_key_images,
+    basic_records_per_tx,
+    contextual_key_images,
     hw::get_device("default"),
     found_enote_records,
     found_spent_key_images
