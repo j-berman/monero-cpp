@@ -759,8 +759,7 @@ void collect_records_and_key_images(
 void prepare_chunk_out(
     const parsed_blocks_t &blocks,
     std::vector<rct::key> &block_ids,
-    uint64_t &start_height,
-    uint64_t &end_height,
+    uint64_t &start_index,
     rct::key &prefix_block_id,
     std::vector<tx_to_scan_t> &txs_to_scan)
 {
@@ -774,13 +773,8 @@ void prepare_chunk_out(
 
         if (i == 0)
         {
-            start_height = block_index;
+            start_index = block_index;
             prefix_block_id = rct::hash2rct(block.prev_id);
-        }
-
-        if (i == blocks.size() - 1)
-        {
-            end_height = block_index + 1;
         }
 
         block_ids.emplace_back(rct::hash2rct(cryptonote::get_block_hash(block)));
@@ -893,7 +887,7 @@ receives_t monero_utils::identify_receives(const std::string &bin, const std::st
       "unknown", // key image
       enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->major : 0, // subaddr major
       enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->minor : 0, // subaddr minor
-      enote_record.second.m_origin_context.m_block_height, // block height
+      enote_record.second.m_origin_context.m_block_index, // block index
       enote_record.second.m_record.m_amount, // amount
     });
   }
@@ -972,7 +966,7 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
       epee::string_tools::pod_to_hex(enote_record.second.m_record.m_key_image), // key image
       enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->major : 0, // subaddr major
       enote_record.second.m_record.m_address_index ? enote_record.second.m_record.m_address_index->minor : 0, // subaddr minor
-      enote_record.second.m_origin_context.m_block_height, // block height
+      enote_record.second.m_origin_context.m_block_index, // block index
       enote_record.second.m_record.m_amount, // amount
     });
   }
@@ -984,7 +978,7 @@ spends_and_receives_t monero_utils::identify_spends_and_receives(const std::stri
       result.first.push_back({
         epee::string_tools::pod_to_hex(spent_key_image_info.second.m_transaction_id), // tx id
         epee::string_tools::pod_to_hex(spent_key_image_info.first), // key image
-        spent_key_image_info.second.m_block_height, // block height
+        spent_key_image_info.second.m_block_index, // block index
       });
     }
   }
@@ -1047,7 +1041,7 @@ void EnoteFindingContextLedgerLegacy::find_basic_records(
         collected_records);
 }
 
-typedef std::pair<parsed_blocks_t, uint64_t/*height*/> onchain_chunk_t;
+typedef std::pair<parsed_blocks_t, uint64_t/*index*/> onchain_chunk_t;
 
 void request_onchain_chunk(
     const std::uint64_t chunk_start_index,
@@ -1078,8 +1072,7 @@ bool try_get_final_chunk(
         throw std::runtime_error("Expected to have scanned up to tip");
 
     // record the end of the chain
-    chunk_out.m_start_height    = next_scan_start_index;
-    chunk_out.m_end_height      = next_scan_start_index;
+    chunk_out.m_start_index     = next_scan_start_index;
     chunk_out.m_prefix_block_id = prefix_block_id;
 
     return true;
@@ -1101,8 +1094,7 @@ void scan_legacy_chunk(
     prepare_chunk_out(
         blocks,
         chunk_out.m_block_ids,
-        chunk_out.m_start_height,
-        chunk_out.m_end_height,
+        chunk_out.m_start_index,
         chunk_out.m_prefix_block_id,
         txs_to_scan);
 
@@ -1172,11 +1164,11 @@ public:
     EnoteScanningContextLedgerMultithreaded& operator=(EnoteScanningContextLedgerMultithreaded&&) = delete;
 
 //member functions
-    /// start scanning from a specified block height
-    void begin_scanning_from_height(const std::uint64_t initial_start_height, const std::uint64_t max_chunk_size) override
+    /// start scanning from a specified block index
+    void begin_scanning_from_index(const std::uint64_t initial_start_index, const std::uint64_t max_chunk_size) override
     {
         // skip genesis block
-        m_next_start_index = initial_start_height == 0 ? 1 : initial_start_height;
+        m_next_start_index = initial_start_index == 0 ? 1 : initial_start_index;
 
         m_max_chunk_size = max_chunk_size;
 
