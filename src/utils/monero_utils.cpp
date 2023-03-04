@@ -406,7 +406,19 @@ void add_default_subaddresses(
     }
 };
 
-typedef std::vector<std::pair<cryptonote::block, std::vector<std::pair<cryptonote::transaction, uint64_t>>>> parsed_blocks_t;
+typedef struct {
+    cryptonote::transaction tx;
+    crypto::hash tx_hash;
+    uint64_t total_output_count_before_tx;
+} parsed_transaction_t;
+
+typedef struct {
+    uint64_t block_index;
+    uint64_t timestamp;
+    crypto::hash block_hash;
+    crypto::hash prev_block_hash;
+    std::vector<parsed_transaction_t> parsed_txs;
+} parsed_block_t;
 
 void validate_get_blocks_res(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res)
 {
@@ -414,7 +426,15 @@ void validate_get_blocks_res(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::resp
         throw std::runtime_error("/getblocks.bin blocks and output indices mismatch");
 }
 
-void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res, parsed_blocks_t &parsed_blocks)
+uint64_t get_total_output_count_before_tx(std::vector<uint64_t> output_indices)
+{
+    // total_output_count_before_tx == global output index of first output in tx.
+    // Some txs have no enotes, in which case we set this value to 0 as it isn't useful.
+    // TODO: pre-RCT outputs
+    return !output_indices.empty() ? output_indices[0] : 0;
+}
+
+void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res, std::vector<parsed_block_t> &parsed_blocks)
 {
   validate_get_blocks_res(res);
 
@@ -429,8 +449,21 @@ void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &r
       throw std::runtime_error("failed to parse block blob at index " + std::to_string(block_idx));
     }
 
-    std::vector<std::pair<cryptonote::transaction, uint64_t>> txs;
-    txs.reserve(res.blocks[block_idx].txs.size());
+    uint64_t block_index = cryptonote::get_block_height(block);
+    uint64_t timestamp = block.timestamp;
+    crypto::hash block_hash = cryptonote::get_block_hash(block);
+    crypto::hash prev_block_hash = block.prev_id;
+
+    std::vector<parsed_transaction_t> parsed_txs;
+    parsed_txs.reserve(1 + res.blocks[block_idx].txs.size());
+
+    crypto::hash miner_tx_hash = cryptonote::get_transaction_hash(block.miner_tx);
+    parsed_txs.emplace_back(parsed_transaction_t{
+            std::move(block.miner_tx),
+            miner_tx_hash,
+            get_total_output_count_before_tx(res.output_indices[block_idx].indices[0].indices)
+        });
+
     for (size_t tx_idx = 0; tx_idx < res.blocks[block_idx].txs.size(); tx_idx++)
     {
       cryptonote::transaction tx;
@@ -439,17 +472,20 @@ void parse_get_blocks(const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &r
         throw std::runtime_error("failed to parse tx blob at index " + std::to_string(tx_idx));
       }
 
-      // total_output_count_before_tx == global output index of first output in tx.
-      // Some txs have no enotes, in which case we set this value to 0 as it isn't useful
-      // TODO: pre-RCT outputs
-      uint64_t total_output_count_before_tx = !res.output_indices[block_idx].indices[tx_idx].indices.empty()
-          ? res.output_indices[block_idx].indices[tx_idx].indices[0]
-          : 0;
-
-      txs.emplace_back(std::make_pair(std::move(tx), total_output_count_before_tx));
+      parsed_txs.emplace_back(parsed_transaction_t{
+                std::move(tx),
+                block.tx_hashes[tx_idx],
+                get_total_output_count_before_tx(res.output_indices[block_idx].indices[1+tx_idx].indices)
+          });
     }
 
-    parsed_blocks.emplace_back(std::make_pair(std::move(block), std::move(txs)));
+    parsed_blocks.emplace_back(parsed_block_t{
+            block_index,
+            timestamp,
+            block_hash,
+            prev_block_hash,
+            std::move(parsed_txs)
+        });
   }
 }
 
@@ -457,46 +493,74 @@ void parse_get_blocks(
     tools::threadpool &tpool,
     tools::threadpool::waiter &waiter,
     const cryptonote::COMMAND_RPC_GET_BLOCKS_FAST::response &res,
-    parsed_blocks_t &parsed_blocks)
+    std::vector<parsed_block_t> &parsed_blocks)
 {
     validate_get_blocks_res(res);
 
     // parse blocks and txs
+    parsed_blocks.clear();
     parsed_blocks.resize(res.blocks.size());
+
+    std::vector<std::vector<crypto::hash>> non_miner_tx_hashes;
+    non_miner_tx_hashes.resize(res.blocks.size());
+
     for (size_t block_idx = 0; block_idx < res.blocks.size(); ++block_idx)
     {
         auto &parsed_block = parsed_blocks[block_idx];
-        tpool.submit(&waiter, [&res, &parsed_block, block_idx]{
-                if (!cryptonote::parse_and_validate_block_from_blob(res.blocks[block_idx].block, parsed_block.first))
+        parsed_block.parsed_txs.resize(1 + res.blocks[block_idx].txs.size());
+
+        // parse block
+        tpool.submit(&waiter, [&res, &parsed_block, &non_miner_tx_hashes, block_idx]{
+                cryptonote::block block;
+                if (!cryptonote::parse_and_validate_block_from_blob(res.blocks[block_idx].block, block))
                 {
                     throw std::runtime_error("failed to parse block blob at index " + std::to_string(block_idx));
                 }
+
+                parsed_block.block_index = cryptonote::get_block_height(block);
+                parsed_block.timestamp = block.timestamp;
+                parsed_block.block_hash = cryptonote::get_block_hash(block);
+                parsed_block.prev_block_hash = block.prev_id;
+
+                crypto::hash miner_tx_hash = cryptonote::get_transaction_hash(block.miner_tx);
+                parsed_block.parsed_txs[0] = parsed_transaction_t{
+                        std::move(block.miner_tx),
+                        miner_tx_hash,
+                        get_total_output_count_before_tx(res.output_indices[block_idx].indices[0].indices)
+                    };
+
+                non_miner_tx_hashes[block_idx] = std::move(block.tx_hashes);
             }, true);
 
         // parse txs
-        parsed_block.second.resize(res.blocks[block_idx].txs.size());
         for (size_t tx_idx = 0; tx_idx < res.blocks[block_idx].txs.size(); ++tx_idx)
         {
-            auto &parsed_tx = parsed_block.second[tx_idx];
+            auto &parsed_tx = parsed_block.parsed_txs[1+tx_idx];
             tpool.submit(&waiter, [&res, &parsed_tx, block_idx, tx_idx]{
                     cryptonote::transaction tx;
                     if (!cryptonote::parse_and_validate_tx_base_from_blob(res.blocks[block_idx].txs[tx_idx].blob, tx))
                     {
                         throw std::runtime_error("failed to parse tx blob at index " + std::to_string(tx_idx));
                     }
-                    parsed_tx.first = std::move(tx);
 
-                    // total_output_count_before_tx == global output index of first output in tx.
-                    // Some txs have no enotes, in which case we set this value to 0 as it isn't useful
-                    // TODO: pre-RCT outputs
-                    parsed_tx.second = !res.output_indices[block_idx].indices[tx_idx].indices.empty()
-                        ? res.output_indices[block_idx].indices[tx_idx].indices[0]
-                        : 0;
+                    parsed_tx = parsed_transaction_t{
+                              std::move(tx),
+                              crypto::hash{},
+                              get_total_output_count_before_tx(res.output_indices[block_idx].indices[1+tx_idx].indices)
+                        };
                 }, true);
         }
     }
     if (!waiter.wait())
-      throw std::runtime_error("Failed waiting to parse txs");
+        throw std::runtime_error("Failed waiting to parse txs");
+
+    for (size_t block_idx = 0; block_idx < non_miner_tx_hashes.size(); ++block_idx)
+    {
+        if (parsed_blocks[block_idx].parsed_txs.size() != non_miner_tx_hashes[block_idx].size() + 1)
+            throw std::runtime_error("Unexpected number of tx hashes");
+        for (size_t tx_idx = 0; tx_idx < non_miner_tx_hashes[block_idx].size(); ++tx_idx)
+            parsed_blocks[block_idx].parsed_txs[1+tx_idx].tx_hash = std::move(non_miner_tx_hashes[block_idx][tx_idx]);
+    }
 }
 
 bool is_encoded_amount_v1(const cryptonote::transaction &tx)
@@ -757,7 +821,7 @@ void collect_records_and_key_images(
 }
 
 void prepare_chunk_out(
-    const parsed_blocks_t &blocks,
+    const std::vector<parsed_block_t> &blocks,
     std::vector<rct::key> &block_ids,
     uint64_t &start_index,
     rct::key &prefix_block_id,
@@ -767,24 +831,27 @@ void prepare_chunk_out(
     block_ids.reserve(blocks.size());
     for (size_t i = 0; i < blocks.size(); ++i)
     {
-        const auto &block_pair = blocks[i];
-        const cryptonote::block &block = block_pair.first;
-        uint64_t block_index = cryptonote::get_block_height(block);
+        const parsed_block_t &parsed_block = blocks[i];
 
         if (i == 0)
         {
-            start_index = block_index;
-            prefix_block_id = rct::hash2rct(block.prev_id);
+            start_index = parsed_block.block_index;
+            prefix_block_id = rct::hash2rct(parsed_block.prev_block_hash);
         }
 
-        block_ids.emplace_back(rct::hash2rct(cryptonote::get_block_hash(block)));
+        block_ids.emplace_back(rct::hash2rct(parsed_block.block_hash));
 
-        for (size_t tx_idx = 0; tx_idx < block_pair.second.size(); ++tx_idx)
+        for (size_t tx_idx = 0; tx_idx < parsed_block.parsed_txs.size(); ++tx_idx)
         {
-            const cryptonote::transaction &tx = block_pair.second[tx_idx].first;
-            uint64_t total_output_count_before_tx = block_pair.second[tx_idx].second;
+            const parsed_transaction_t &parsed_tx = parsed_block.parsed_txs[tx_idx];
             tx_to_scan_t tx_to_scan;
-            prepare_tx_for_scanner(block_index, block.timestamp, block.tx_hashes[tx_idx], tx, total_output_count_before_tx, tx_to_scan);
+            prepare_tx_for_scanner(
+                parsed_block.block_index,
+                parsed_block.timestamp,
+                parsed_tx.tx_hash,
+                parsed_tx.tx,
+                parsed_tx.total_output_count_before_tx,
+                tx_to_scan);
             txs_to_scan.emplace_back(std::move(tx_to_scan));
         }
     }
@@ -799,22 +866,25 @@ void view_scan_legacy_chunk(
     std::list<sp::SpContextualKeyImageSetV1> &contextual_key_images)
 {
     // parse the chunk
-    parsed_blocks_t blocks;
+    std::vector<parsed_block_t> blocks;
     parse_get_blocks(chunk_to_scan, blocks);
 
     // scan block by block
     for (size_t i = 0; i < blocks.size(); ++i)
     {
-        const auto &block_pair = blocks[i];
-        const cryptonote::block &block = block_pair.first;
-        uint64_t block_index = cryptonote::get_block_height(block);
+        const parsed_block_t &parsed_block = blocks[i];
 
-        for (size_t tx_idx = 0; tx_idx < block_pair.second.size(); ++tx_idx)
+        for (size_t tx_idx = 0; tx_idx < parsed_block.parsed_txs.size(); ++tx_idx)
         {
-            const cryptonote::transaction &tx = block_pair.second[tx_idx].first;
-            uint64_t total_output_count_before_tx = block_pair.second[tx_idx].second;
+            const parsed_transaction_t &parsed_tx = parsed_block.parsed_txs[tx_idx];
             tx_to_scan_t tx_to_scan;
-            prepare_tx_for_scanner(block_index, block.timestamp, block.tx_hashes[tx_idx], tx, total_output_count_before_tx, tx_to_scan);
+            prepare_tx_for_scanner(
+                parsed_block.block_index,
+                parsed_block.timestamp,
+                parsed_tx.tx_hash,
+                parsed_tx.tx,
+                parsed_tx.total_output_count_before_tx,
+                tx_to_scan);
 
             std::list<sp::ContextualBasicRecordVariant> collected_records;
             sp::SpContextualKeyImageSetV1 collected_key_images;
@@ -1041,8 +1111,6 @@ void EnoteFindingContextLedgerLegacy::find_basic_records(
         collected_records);
 }
 
-typedef std::pair<parsed_blocks_t, uint64_t/*index*/> onchain_chunk_t;
-
 void request_onchain_chunk(
     const std::uint64_t chunk_start_index,
     const std::unique_ptr<epee::net_utils::http::abstract_http_client> &http_client,
@@ -1086,7 +1154,7 @@ void scan_legacy_chunk(
     sp::EnoteScanningChunkLedgerV1 &chunk_out)
 {
     // parse the chunk
-    parsed_blocks_t blocks;
+    std::vector<parsed_block_t> blocks;
     parse_get_blocks(tpool, waiter, chunk_to_scan, blocks);
 
     // prepare chunk for scanning
